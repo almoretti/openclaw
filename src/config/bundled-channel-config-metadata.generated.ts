@@ -15052,7 +15052,15 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
             type: "object",
             properties: {
               requireMention: {
-                type: "boolean",
+                anyOf: [
+                  {
+                    type: "boolean",
+                  },
+                  {
+                    type: "string",
+                    const: "monitor",
+                  },
+                ],
               },
               tools: {
                 type: "object",
@@ -15305,7 +15313,15 @@ export const GENERATED_BUNDLED_CHANNEL_CONFIG_METADATA = [
                   type: "object",
                   properties: {
                     requireMention: {
-                      type: "boolean",
+                      anyOf: [
+                        {
+                          type: "boolean",
+                        },
+                        {
+                          type: "string",
+                          const: "monitor",
+                        },
+                      ],
                     },
                     tools: {
                       type: "object",
