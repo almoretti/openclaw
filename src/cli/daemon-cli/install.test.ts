@@ -10,7 +10,15 @@ const resolveGatewayPortMock = vi.hoisted(() => vi.fn(() => 18789));
 const writeConfigFileMock = vi.hoisted(() => vi.fn());
 const resolveIsNixModeMock = vi.hoisted(() => vi.fn(() => false));
 const resolveSecretInputRefMock = vi.hoisted(() =>
-  vi.fn((): { ref: unknown } => ({ ref: undefined })),
+  vi.fn((_value?: unknown): { ref: unknown } => ({ ref: undefined })),
+);
+const hasConfiguredSecretInputMock = vi.hoisted(() =>
+  vi.fn((value: unknown): boolean => {
+    if (typeof value === "string" && value.trim()) {
+      return true;
+    }
+    return resolveSecretInputRefMock(value)?.ref != null;
+  }),
 );
 const resolveGatewayAuthMock = vi.hoisted(() =>
   vi.fn(() => ({
@@ -44,6 +52,7 @@ const service = vi.hoisted(() => ({
   loadedText: "loaded",
   notLoadedText: "not loaded",
   isLoaded: vi.fn(async () => false),
+  stage: vi.fn(async () => {}),
   install: vi.fn(async () => {}),
   uninstall: vi.fn(async () => {}),
   restart: vi.fn(async () => {}),
@@ -56,19 +65,30 @@ vi.mock("../../bootstrap/node-startup-env.js", () => ({
   resolveNodeStartupTlsEnvironment: resolveNodeStartupTlsEnvironmentMock,
 }));
 
-vi.mock("../../config/config.js", () => ({
+vi.mock("../../config/io.js", () => ({
   loadConfig: loadConfigMock,
-  readBestEffortConfig: loadConfigMock,
-  readConfigFileSnapshot: readConfigFileSnapshotMock,
-  resolveGatewayPort: resolveGatewayPortMock,
-  writeConfigFile: writeConfigFileMock,
+  readConfigFileSnapshotForWrite: vi.fn(async () => ({
+    snapshot: await readConfigFileSnapshotMock(),
+    writeOptions: { expectedConfigPath: "/tmp/openclaw.json" },
+  })),
 }));
 
 vi.mock("../../config/paths.js", () => ({
+  resolveGatewayPort: resolveGatewayPortMock,
   resolveIsNixMode: resolveIsNixModeMock,
 }));
 
+vi.mock("../../commands/gateway-install-token.persist.runtime.js", () => ({
+  readConfigFileSnapshot: readConfigFileSnapshotMock,
+  readConfigFileSnapshotForWrite: vi.fn(async () => ({
+    snapshot: await readConfigFileSnapshotMock(),
+    writeOptions: { expectedConfigPath: "/tmp/openclaw.json" },
+  })),
+  writeConfigFile: writeConfigFileMock,
+}));
+
 vi.mock("../../config/types.secrets.js", () => ({
+  hasConfiguredSecretInput: hasConfiguredSecretInputMock,
   resolveSecretInputRef: resolveSecretInputRefMock,
 }));
 
@@ -80,7 +100,7 @@ vi.mock("../../secrets/resolve.js", () => ({
   resolveSecretRefValues: resolveSecretRefValuesMock,
 }));
 
-vi.mock("../../commands/onboard-helpers.js", () => ({
+vi.mock("../../commands/random-token.js", () => ({
   randomToken: randomTokenMock,
 }));
 
@@ -167,13 +187,19 @@ describe("runDaemonInstall", () => {
     isGatewayDaemonRuntimeMock.mockReset();
     installDaemonServiceAndEmitMock.mockReset();
     service.isLoaded.mockReset();
+    service.stage.mockReset();
     resetRuntimeCapture();
     actionState.warnings.length = 0;
     actionState.emitted.length = 0;
     actionState.failed.length = 0;
 
     loadConfigMock.mockReturnValue({ gateway: { auth: { mode: "token" } } });
-    readConfigFileSnapshotMock.mockResolvedValue({ exists: false, valid: true, config: {} });
+    readConfigFileSnapshotMock.mockResolvedValue({
+      exists: false,
+      valid: true,
+      config: {},
+      sourceConfig: { gateway: { auth: { mode: "token" } } },
+    });
     resolveGatewayPortMock.mockReturnValue(18789);
     resolveIsNixModeMock.mockReturnValue(false);
     resolveSecretInputRefMock.mockReturnValue({ ref: undefined });
@@ -194,6 +220,7 @@ describe("runDaemonInstall", () => {
     isGatewayDaemonRuntimeMock.mockReturnValue(true);
     installDaemonServiceAndEmitMock.mockResolvedValue(undefined);
     service.isLoaded.mockResolvedValue(false);
+    service.stage.mockResolvedValue(undefined);
     service.readCommand.mockResolvedValue(null);
     resolveNodeStartupTlsEnvironmentMock.mockReturnValue({
       NODE_EXTRA_CA_CERTS: undefined,
@@ -256,6 +283,7 @@ describe("runDaemonInstall", () => {
       exists: true,
       valid: true,
       config: { gateway: { auth: { mode: "token" } } },
+      sourceConfig: { gateway: { auth: { mode: "token" } } },
     });
 
     await runDaemonInstall({ json: true });
@@ -354,5 +382,35 @@ describe("runDaemonInstall", () => {
         execPath: "/home/test/.nvm/versions/node/v22.18.0/bin/node",
       }),
     );
+  });
+
+  it("reuses env-backed service secrets during forced reinstall when the current shell is missing them", async () => {
+    service.isLoaded.mockResolvedValue(true);
+    service.readCommand.mockResolvedValue({
+      programArguments: ["openclaw", "gateway", "run"],
+      environment: {
+        OPENAI_API_KEY: "service-openai-key",
+      },
+    } as never);
+    const previous = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      await runDaemonInstall({ json: true, force: true });
+
+      expect(buildGatewayInstallPlanMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            OPENAI_API_KEY: "service-openai-key",
+          }),
+        }),
+      );
+      expect(installDaemonServiceAndEmitMock).toHaveBeenCalledTimes(1);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENAI_API_KEY;
+      } else {
+        process.env.OPENAI_API_KEY = previous;
+      }
+    }
   });
 });
